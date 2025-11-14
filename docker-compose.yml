@@ -1,0 +1,17 @@
+version: '3.8'
+services:
+  db:
+    image: postgres:14-alpine
+    container_name: ps_postgres_db
+    restart: always
+    environment:
+      POSTGRES_USER: ps_admin
+      POSTGRES_PASSWORD: Sup3rS@f3P@ssw0rd!
+      POSTGRES_DB: ps_system_db
+    ports:
+      - "5432:5432" # แมพพอร์ตจากเครื่องคุณไปยัง Docker
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata: # สร้างพื้นที่เก็บข้อมูลถาวร
