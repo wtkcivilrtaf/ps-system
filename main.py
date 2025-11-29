@@ -146,6 +146,7 @@ async def handle_api_request(request_data: ApiRequest, request: Request, respons
             if session and action_name in [
                 "logout", "list_personnel", "submit_status_report",
                 "get_submission_history", "get_active_statuses",
+                "get_personnel_details",
                 "get_daily_personnel_for_submission", "submit_daily_report",
                 "get_daily_dashboard_summary", "get_daily_submission_history",
                 "get_daily_final_report", "archive_daily_reports",

@@ -1,0 +1,30 @@
+# --- Security: ห้ามอัปโหลดไฟล์ความลับเด็ดขาด ---
+.env
+.env.*
+config.py
+secrets.json
+*.key
+*.pem
+
+# --- Python: ไฟล์ขยะจากการรันโปรแกรม ---
+__pycache__/
+*.py[cod]
+*$py.class
+
+# --- Environments: โฟลเดอร์จำลองสภาพแวดล้อม ---
+env/
+venv/
+.venv/
+ENV/
+
+# --- IDE: ไฟล์ตั้งค่าของโปรแกรมเขียนโค้ด (ไม่จำเป็นสำหรับคนอื่น) ---
+.vscode/
+.idea/
+
+# --- Database: ถ้ามีไฟล์ Database ในเครื่อง (SQLite) ไม่ควรขึ้น ---
+*.sqlite3
+*.db
+
+# --- OS: ไฟล์ขยะของระบบปฏิบัติการ ---
+.DS_Store
+Thumbs.db
