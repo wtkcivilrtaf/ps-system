@@ -144,6 +144,16 @@ async function loadDataForPane(paneId, department = null) {
         try {
             const res = await sendRequest('get_daily_personnel_for_submission', payload);
             if (res.status === 'success') {
+                
+                // --- [EDIT FIX START] ---
+                if (window.editingDailyReportData) {
+                    // Force using the report date from the edited report
+                    res.report_date = window.editingDailyReportData.report_date;
+                    // Reset submission status to null to force form display (edit mode)
+                    res.submission_status = null;
+                }
+                // --- [EDIT FIX END] ---
+
                 currentDepartment = res.department;
                 currentReportDate = res.report_date;
                 renderSubmissionForm(res);
@@ -203,6 +213,11 @@ async function loadDataForPane(paneId, department = null) {
 }
 
 async function switchTab(tabId) {
+    // If switching OUT of submit tab, clear editing data
+    if (tabId !== 'tab-daily-submit') {
+        window.editingDailyReportData = null;
+    }
+
     for (const tab of tabs) {
         const paneId = tab.id.replace('tab-', 'pane-');
         const pane = document.getElementById(paneId);
@@ -231,11 +246,12 @@ async function handleDailyHistoryEditClick(e) {
     if (!reportId) return;
 
     try {
+        // [NOTE] Ensure 'get_daily_report_for_editing' is implemented in backend
         const res = await sendRequest('get_daily_report_for_editing', { id: reportId });
         if (res.status === 'success' && res.report) {
             window.editingDailyReportData = res.report;
             if (currentUser.role === 'admin') {
-                // We don't need to set the dropdown here because loadDataForPane will handle it
+                // Admin specific logic if needed
             }
             switchTab('tab-daily-submit');
         } else {
@@ -360,6 +376,7 @@ async function handleSubmitDailyReport() {
         const res = await sendRequest('submit_daily_report', payload);
         ui.showMessage(res.message, res.status === 'success');
         if (res.status === 'success') {
+            window.editingDailyReportData = null; // Clear edit state
             reviewReportSectionDaily.classList.add('hidden');
             dailySubmissionContent.classList.remove('hidden');
             if (currentUser.role === 'admin') {
@@ -636,9 +653,12 @@ function renderSubmissionForm(res) {
                         if (endDatePicker) endDatePicker.setDate(savedItem.end_date);
                     }
                 });
+                updateCategorySummary(key); // Update summary after pre-fill
             }
         });
-        window.editingDailyReportData = null; // Clear after use
+        // Note: Do NOT clear window.editingDailyReportData here immediately, 
+        // as loadDataForPane might need it to set the date. 
+        // Better to clear it when switching tabs away or upon successful submission.
     }
     
     reviewReportSectionDaily.classList.add('hidden');

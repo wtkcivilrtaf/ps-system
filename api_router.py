@@ -14,10 +14,11 @@ import time
 import re
 from email.utils import formatdate
 from urllib.parse import urlparse
+import traceback 
 
 from database import hash_password, verify_password
 
-# --- Configuration (เหมือนเดิม) ---
+# --- Configuration ---
 FAILED_LOGIN_ATTEMPTS = {}
 LOCKOUT_TIME = 300
 MAX_ATTEMPTS = 5
@@ -36,7 +37,18 @@ RANK_CLASSIFICATION = {
     'civilian': ['นาย', 'นาง', 'นางสาว']
 }
 
-# --- Helper Functions (เหมือนเดิม) ---
+# --- Helper Functions ---
+def get_rank_index(rank_str):
+    """Helper function to get rank index for sorting"""
+    try:
+        return RANK_ORDER.index(rank_str)
+    except ValueError:
+        return len(RANK_ORDER) # Put unknown ranks at the end
+
+def sort_personnel_by_rank(personnel_list):
+    """Sorts a list of personnel dictionaries by rank then first_name"""
+    return sorted(personnel_list, key=lambda x: (get_rank_index(x.get('rank')), x.get('first_name')))
+
 def get_current_week_range_str(cursor):
     cursor.execute("SELECT value FROM system_settings WHERE key = 'current_week_start_date'")
     start_date_row = cursor.fetchone()
@@ -61,18 +73,21 @@ def get_current_week_range_str(cursor):
 
 def get_daily_target_date(cursor):
     cursor.execute("SELECT date FROM holidays")
-    holidays = {date.fromisoformat(row['date']) for row in cursor.fetchall()}
+    holidays = {row['date'] for row in cursor.fetchall()}
+    
     cursor.execute("SELECT MAX(report_date) FROM archived_daily_reports")
     last_archived_row = cursor.fetchone()
     start_date = date.today()
     if last_archived_row and last_archived_row[0]:
-        start_date = date.fromisoformat(last_archived_row[0])
+        start_date = last_archived_row[0]
+    
     cursor.execute("SELECT MAX(report_date) FROM daily_reports")
     last_daily_row = cursor.fetchone()
     if last_daily_row and last_daily_row[0]:
-        last_daily_date = date.fromisoformat(last_daily_row[0])
+        last_daily_date = last_daily_row[0]
         if last_daily_date > start_date:
             return last_daily_date
+            
     next_day = start_date
     while True:
         next_day += timedelta(days=1)
@@ -88,22 +103,36 @@ def is_password_complex(password):
     return True
 
 def classify_personnel(personnel_list):
+    # Sort before classifying to ensure order within categories
+    sorted_list = sort_personnel_by_rank(personnel_list)
     classified = { 'officer': [], 'nco': [], 'civilian': [] }
-    for p in personnel_list:
+    for p in sorted_list:
         person_rank = p.get('rank')
         if person_rank in RANK_CLASSIFICATION['officer']: classified['officer'].append(p)
         elif person_rank in RANK_CLASSIFICATION['nco']: classified['nco'].append(p)
         elif person_rank in RANK_CLASSIFICATION['civilian']: classified['civilian'].append(p)
     return classified
 
-# --- Action Handlers (แก้ไข 2 จุด, ที่เหลือเหมือนเดิม) ---
+# --- Action Handlers ---
 
 def handle_login(payload, conn, cursor, client_address):
     ip_address = client_address[0]
     if ip_address in FAILED_LOGIN_ATTEMPTS:
         attempts, last_attempt_time = FAILED_LOGIN_ATTEMPTS[ip_address]
-        if attempts >= MAX_ATTEMPTS and time.time() - last_attempt_time < LOCKOUT_TIME:
-            return {"status": "error", "message": "คุณพยายามล็อกอินผิดพลาดบ่อยเกินไป กรุณาลองใหม่อีกครั้งใน 5 นาที"}, None
+        time_passed = time.time() - last_attempt_time
+        
+        if attempts >= MAX_ATTEMPTS:
+            if time_passed < LOCKOUT_TIME:
+                remaining_time = int(LOCKOUT_TIME - time_passed)
+                minutes = remaining_time // 60
+                seconds = remaining_time % 60
+                return {
+                    "status": "error", 
+                    "message": f"คุณพยายามล็อกอินผิดพลาดบ่อยเกินไป กรุณาลองใหม่อีกครั้งใน {minutes} นาที {seconds} วินาที"
+                }, None
+            else:
+                del FAILED_LOGIN_ATTEMPTS[ip_address]
+
     username, password = payload.get("username"), payload.get("password")
     cursor.execute("SELECT * FROM users WHERE username = %s", (username,))
     user_data = cursor.fetchone()
@@ -152,7 +181,8 @@ def handle_get_dashboard_summary(payload, conn, cursor):
         for item in report['report_data']:
             status_summary[item.get('status', 'ไม่ระบุ')] += 1
     cursor.execute("SELECT COUNT(id) as total FROM personnel")
-    total_personnel = cursor.fetchone()['total']
+    total_personnel_row = cursor.fetchone()
+    total_personnel = total_personnel_row['total'] if total_personnel_row else 0
     total_on_duty = total_personnel - sum(status_summary.values())
     summary = {
         "all_departments": all_departments, "submitted_info": submitted_info, "status_summary": dict(status_summary), 
@@ -232,12 +262,30 @@ def handle_list_personnel(payload, conn, cursor, session):
     count_query = "SELECT COUNT(*) as total" + base_query + where_clause_str
     cursor.execute(count_query, params)
     total_items = cursor.fetchone()['total']
+    
+    # [SORTING FIX] Remove LIMIT/OFFSET from DB query when fetch_all is True to sort in memory correctly if needed,
+    # BUT better to sort after fetching all. However, we have pagination.
+    # Pagination + Sorting by rank string is hard in SQL without a rank table.
+    # So we fetch page by page and sort page? No, that's wrong.
+    # Correct way: Fetch all matching, sort in python, then slice for pagination.
+    
     data_query = "SELECT *" + base_query + where_clause_str
-    if not fetch_all:
-        data_query += " LIMIT %s OFFSET %s"
-        params.extend([ITEMS_PER_PAGE, offset])
     cursor.execute(data_query, params)
-    personnel = [{k: escape(str(v)) if v is not None else '' for k, v in dict(row).items()} for row in cursor.fetchall()]
+    all_rows = [dict(row) for row in cursor.fetchall()]
+    
+    # Sort all rows by rank
+    sorted_rows = sort_personnel_by_rank(all_rows)
+    
+    # Pagination Logic
+    if not fetch_all:
+        start = offset
+        end = offset + ITEMS_PER_PAGE
+        rows_to_return = sorted_rows[start:end]
+    else:
+        rows_to_return = sorted_rows
+
+    personnel = [{k: escape(str(v)) if v is not None else '' for k, v in row.items()} for row in rows_to_return]
+    
     submission_status = None
     if not is_admin:
         cursor.execute("SELECT timestamp FROM status_reports WHERE department = %s ORDER BY timestamp DESC LIMIT 1", (department,))
@@ -259,6 +307,7 @@ def handle_list_personnel(payload, conn, cursor, session):
             params_status.append(department)
         cursor.execute(query, params_status)
         persistent_statuses = [dict(row) for row in cursor.fetchall()]
+        
     response_data = {
         "status": "success", "personnel": personnel, "total": total_items, "page": page,
         "submission_status": submission_status, "weekly_date_range": get_current_week_range_str(cursor),
@@ -268,8 +317,6 @@ def handle_list_personnel(payload, conn, cursor, session):
         response_data["all_departments"] = all_departments
     return response_data
 
-# --- START: PHASE 2 (RBAC Fix) ---
-# เพิ่ม 'session' parameter และตรวจสอบสิทธิ์
 def handle_get_personnel_details(payload, conn, cursor, session):
     person_id = payload.get("id")
     if not person_id: 
@@ -278,12 +325,9 @@ def handle_get_personnel_details(payload, conn, cursor, session):
     query = "SELECT * FROM personnel WHERE id = %s"
     params = [person_id]
 
-    # --- RBAC Check ---
-    # ถ้าไม่ใช่ Admin ให้บังคับว่าต้องดูได้แค่คนในแผนกตัวเอง
     if session.get("role") != "admin":
         query += " AND department = %s"
         params.append(session.get("department"))
-    # --- End RBAC Check ---
 
     cursor.execute(query, params)
     personnel_data = cursor.fetchone()
@@ -291,10 +335,7 @@ def handle_get_personnel_details(payload, conn, cursor, session):
     if personnel_data: 
         return {"status": "success", "personnel": dict(personnel_data)}
     
-    # ถ้า Admin ขอ แล้วไม่เจอ = ไม่เจอจริงๆ
-    # ถ้า User ขอ แล้วไม่เจอ = อาจจะไม่มีอยู่จริง หรือ "ไม่มีสิทธิ์"
     return {"status": "error", "message": "ไม่พบข้อมูลกำลังพล หรือคุณไม่มีสิทธิ์เข้าถึง"}
-# --- END: PHASE 2 (RBAC Fix) ---
 
 def handle_add_personnel(payload, conn, cursor):
     data = payload.get("data", {})
@@ -328,9 +369,13 @@ def handle_submit_status_report(payload, conn, cursor, session):
     report_data = payload.get("report", {})
     submitted_by = session.get("username")
     user_department = report_data.get("department", session.get("department"))
-    server_now = datetime.utcnow() + timedelta(hours=7)
-    date_str = server_now.strftime('%Y-%m-%d')
-    timestamp_str = server_now.strftime('%Y-%m-%d %H:%M:%S')
+    
+    server_now_utc = datetime.utcnow()
+    server_now_thai = server_now_utc + timedelta(hours=7)
+    
+    date_str = server_now_thai.strftime('%Y-%m-%d')
+    timestamp_str = server_now_utc.strftime('%Y-%m-%d %H:%M:%S')
+    
     cursor.execute("DELETE FROM status_reports WHERE department = %s", (user_department,))
     cursor.execute("INSERT INTO status_reports (id, date, submitted_by, department, report_data, timestamp) VALUES (%s, %s, %s, %s, %s, %s)",
                    (str(uuid.uuid4()), date_str, submitted_by, user_department, json.dumps(report_data["items"]), timestamp_str))
@@ -349,6 +394,105 @@ def handle_submit_status_report(payload, conn, cursor, session):
             )
     conn.commit()
     return {"status": "success", "message": "ส่งยอดกำลังพลสำเร็จ"}
+
+def handle_submit_all_status_reports(payload, conn, cursor, session):
+    try:
+        if session.get("role") != "admin":
+            return {"status": "error", "message": "สำหรับผู้ดูแลระบบเท่านั้น"}
+
+        cursor.execute("SELECT DISTINCT department FROM personnel WHERE department IS NOT NULL AND department != ''")
+        depts = [r['department'] for r in cursor.fetchall()]
+
+        cursor.execute("SELECT id, rank, first_name, last_name, department FROM personnel")
+        personnel_map = {}
+        for p in cursor.fetchall():
+            personnel_map[str(p['id'])] = dict(p)
+
+        today_str = date.today().isoformat()
+        cursor.execute("SELECT * FROM persistent_statuses WHERE end_date >= %s", (today_str,))
+        status_rows = cursor.fetchall()
+        
+        dept_statuses = defaultdict(list)
+        for s in status_rows:
+            pid = str(s['personnel_id'])
+            if pid in personnel_map:
+                person = personnel_map[pid]
+                dept = person.get('department')
+                if dept:
+                    dept_statuses[dept].append(s)
+
+        submitted_by = session.get("username")
+        server_now_utc = datetime.utcnow()
+        server_now_thai = server_now_utc + timedelta(hours=7)
+        date_str = server_now_thai.strftime('%Y-%m-%d')
+        timestamp_str = server_now_utc.strftime('%Y-%m-%d %H:%M:%S')
+
+        cursor.execute("SELECT DISTINCT department FROM status_reports") 
+        already_submitted_depts = [r['department'] for r in cursor.fetchall()]
+
+        count = 0
+        for dept in depts:
+            if dept in already_submitted_depts:
+                continue 
+
+            items = []
+            
+            # [SORTING FIX] Get ALL personnel in this department to ensure list is complete and sorted
+            # Instead of just active status, we should ideally list everyone? 
+            # Weekly submission usually lists everyone or just active?
+            # Based on handle_submit_status_report, frontend sends 'items' which is usually everyone.
+            # But here we are auto-generating. If we only include persistent status, others are missing?
+            # Wait, weekly report structure: 'items' usually contains list of people with status.
+            # If status is empty, they are just 'Normal/Present'.
+            # To be safe, we should fetch ALL personnel for that department and map status.
+            
+            dept_personnel_ids = [pid for pid, p in personnel_map.items() if p.get('department') == dept]
+            # Sort personnel for the report item list
+            dept_personnel_ids.sort(key=lambda pid: (get_rank_index(personnel_map[pid].get('rank')), personnel_map[pid].get('first_name')))
+
+            statuses = {str(s['personnel_id']): s for s in dept_statuses.get(dept, [])}
+            
+            for pid in dept_personnel_ids:
+                p = personnel_map[pid]
+                s = statuses.get(pid, {})
+                
+                # Default status is "ไม่มี" (None/Present)
+                status_val = s.get('status', 'ไม่มี')
+                details_val = s.get('details', '')
+                start_date_val = str(s.get('start_date', ''))
+                end_date_val = str(s.get('end_date', ''))
+                
+                if status_val == 'ไม่มี':
+                     start_date_val = ''
+                     end_date_val = ''
+
+                items.append({
+                    "personnel_id": pid,
+                    "personnel_name": f"{p.get('rank', '')} {p.get('first_name', '')} {p.get('last_name', '')}".strip(),
+                    "status": status_val,
+                    "details": details_val,
+                    "start_date": start_date_val,
+                    "end_date": end_date_val
+                })
+            
+            try:
+                cursor.execute(
+                    "INSERT INTO status_reports (id, date, submitted_by, department, report_data, timestamp) VALUES (%s, %s, %s, %s, %s, %s)",
+                    (str(uuid.uuid4()), date_str, submitted_by, dept, json.dumps(items, default=str), timestamp_str)
+                )
+                count += 1
+            except Exception as e:
+                print(f"Error creating report for {dept}: {e}")
+
+        conn.commit()
+        if count == 0:
+            return {"status": "success", "message": "ทุกแผนกส่งยอดครบแล้ว (ไม่มีการสร้างรายงานเพิ่ม)"}
+        else:
+            return {"status": "success", "message": f"เติมยอดให้ {count} แผนกที่ขาดเรียบร้อยแล้ว"}
+
+    except Exception as e:
+        traceback.print_exc()
+        return {"status": "error", "message": f"เกิดข้อผิดพลาดภายในเซิร์ฟเวอร์: {str(e)}"}
 
 def handle_get_status_reports(payload, conn, cursor):
     cursor.execute("SELECT sr.id, sr.date, sr.department, sr.timestamp, sr.report_data, u.rank, u.first_name, u.last_name FROM status_reports sr JOIN users u ON sr.submitted_by = u.username ORDER BY sr.timestamp DESC")
@@ -376,7 +520,7 @@ def handle_archive_reports(payload, conn, cursor, session):
     full_report_data = json.dumps(reports_to_archive)
     cursor.execute(
         "INSERT INTO archived_reports (id, week_range, report_data, archived_by, timestamp) VALUES (%s, %s, %s, %s, %s)",
-        (str(uuid.uuid4()), week_range, full_report_data, archived_by_user, datetime.utcnow() + timedelta(hours=7))
+        (str(uuid.uuid4()), week_range, full_report_data, archived_by_user, datetime.utcnow()) # [TIMEZONE FIX] Use UTC
     )
     cursor.execute("DELETE FROM status_reports")
     conn.commit()
@@ -411,19 +555,16 @@ def handle_get_archived_reports(payload, conn, cursor):
 def handle_get_submission_history(payload, conn, cursor, session):
     user_dept = session.get("department")
     if not user_dept: return {"status": "error", "message": "ไม่พบข้อมูลแผนกของผู้ใช้"}
+    
+    # Query only ACTIVE reports from status_reports
     query = """
     SELECT id, date, submitted_by, department, timestamp, report_data, 'active' as source
     FROM status_reports WHERE department = %(dept)s
     """
-    cursor.execute("SELECT to_regclass('archived_reports_old')")
-    if cursor.fetchone()[0]:
-        query += """
-        UNION ALL
-        SELECT id, date, submitted_by, department, timestamp, report_data, 'archived' as source
-        FROM archived_reports_old WHERE department = %(dept)s
-        """
+    
     query += " ORDER BY timestamp DESC"
     cursor.execute(query, {"dept": user_dept})
+    
     history_by_month = defaultdict(lambda: defaultdict(list))
     for row in cursor.fetchall():
         report = dict(row)
@@ -435,38 +576,33 @@ def handle_get_submission_history(payload, conn, cursor, session):
         history_by_month[year_be][month].append(report)
     return {"status": "success", "history": dict(history_by_month)}
 
-# --- START: PHASE 2 (RBAC Fix) ---
-# เพิ่ม 'session' parameter และตรวจสอบสิทธิ์
 def handle_get_report_for_editing(payload, conn, cursor, session):
     report_id = payload.get("id")
     if not report_id: 
         return {"status": "error", "message": "ไม่พบ ID ของรายงาน"}
     
-    # --- RBAC Check ---
-    # ตรวจสอบว่า User ที่ขอมา เป็นเจ้าของ report นั้นหรือไม่ (ถ้าไม่ใช่ Admin)
-    base_query = "SELECT report_data, department FROM {table_name} WHERE id = %s"
+    # Query ONLY status_reports (Active reports)
+    base_query = "SELECT report_data, department FROM status_reports WHERE id = %s"
     params = [report_id]
+    
     if session.get("role") != "admin":
         base_query += " AND department = %s"
         params.append(session.get("department"))
-    # --- End RBAC Check ---
 
-    # 1. Check active reports
-    cursor.execute(base_query.format(table_name="status_reports"), params)
+    cursor.execute(base_query, params)
     report = cursor.fetchone()
     
-    # 2. If not found, check the old archive table (if it exists)
-    if not report:
-        cursor.execute("SELECT to_regclass('archived_reports_old')")
-        if cursor.fetchone()[0]:
-            cursor.execute(base_query.format(table_name="archived_reports_old"), params)
-            report = cursor.fetchone()
-
     if report:
-        return {"status": "success", "report": {"items": report['report_data'], "department": report['department']}}
+        report_items = report['report_data']
+        # Handle case where JSONB might be returned as string by some drivers/configs
+        if isinstance(report_items, str):
+            try:
+                report_items = json.loads(report_items)
+            except:
+                report_items = []
+        return {"status": "success", "report": {"items": report_items, "department": report['department']}}
     
-    return {"status": "error", "message": "ไม่พบข้อมูลรายงาน หรือคุณไม่มีสิทธิ์เข้าถึง"}
-# --- END: PHASE 2 (RBAC Fix) ---
+    return {"status": "error", "message": "ไม่พบข้อมูลรายงาน (อาจถูกเก็บถาวรไปแล้ว หรือคุณไม่มีสิทธิ์)"}
 
 def handle_get_active_statuses(payload, conn, cursor, session):
     today_str = date.today().isoformat()
@@ -506,7 +642,7 @@ def handle_get_active_statuses(payload, conn, cursor, session):
         "available_personnel": available_personnel, "total_personnel": total_personnel_in_scope
     }
 
-# --- DAILY SYSTEM HANDLERS (เหมือนเดิม) ---
+# --- DAILY SYSTEM HANDLERS ---
 def handle_get_daily_dashboard_summary(payload, conn, cursor, session):
     target_date = get_daily_target_date(cursor)
     target_date_str = target_date.strftime('%Y-%m-%d')
@@ -549,7 +685,10 @@ def handle_get_daily_personnel_for_submission(payload, conn, cursor, session):
             submission_status = {"timestamp": last_submission['timestamp']}
     cursor.execute("SELECT * FROM personnel WHERE department = %s", (department_to_view,))
     personnel_in_dept = [dict(row) for row in cursor.fetchall()]
+    
+    # [SORTING FIX]
     classified_personnel = classify_personnel(personnel_in_dept)
+    
     cursor.execute("SELECT * FROM persistent_statuses WHERE end_date >= %s AND start_date <= %s AND department = %s",
                    (target_date_str, target_date_str, department_to_view))
     active_statuses = {row['personnel_id']: dict(row) for row in cursor.fetchall()}
@@ -577,8 +716,10 @@ def handle_submit_daily_report(payload, conn, cursor, session):
     report_date_str = data.get("report_date")
     if not all([department, report_date_str]):
         return {"status": "error", "message": "ข้อมูลไม่ครบถ้วน"}
-    server_now = datetime.utcnow() + timedelta(hours=7)
-    timestamp_str = server_now.strftime('%Y-%m-%d %H:%M:%S')
+    
+    server_now_utc = datetime.utcnow()
+    timestamp_str = server_now_utc.strftime('%Y-%m-%d %H:%M:%S')
+
     cursor.execute("DELETE FROM daily_reports WHERE department = %s AND report_date = %s", (department, report_date_str))
     cursor.execute(
         "INSERT INTO daily_reports (id, report_date, department, submitted_by, timestamp, summary_data, report_data) VALUES (%s, %s, %s, %s, %s, %s, %s)",
@@ -607,7 +748,7 @@ def handle_submit_daily_report(payload, conn, cursor, session):
 def handle_get_daily_submission_history(payload, conn, cursor, session):
     is_admin = session.get("role") == "admin"
     department = session.get("department")
-    query = "SELECT report_date, department, submitted_by, timestamp, summary_data FROM daily_reports"
+    query = "SELECT id, report_date, department, submitted_by, timestamp, summary_data FROM daily_reports"
     params = []
     if not is_admin:
         query += " WHERE department = %s"
@@ -622,8 +763,32 @@ def handle_get_daily_submission_history(payload, conn, cursor, session):
         month = str(report_dt.month)
         report['summary'] = report.get("summary_data", "{}")
         del report["summary_data"]
+        report['source'] = 'active'
         history_by_month[year_be][month].append(report)
     return {"status": "success", "history": dict(history_by_month)}
+
+def handle_get_daily_report_for_editing(payload, conn, cursor, session):
+    report_id = payload.get("id")
+    if not report_id: 
+        return {"status": "error", "message": "ไม่พบ ID ของรายงาน"}
+    
+    # --- RBAC Check ---
+    base_query = "SELECT * FROM daily_reports WHERE id = %s"
+    params = [report_id]
+    
+    if session.get("role") != "admin":
+        base_query += " AND department = %s"
+        params.append(session.get("department"))
+    # --- End RBAC Check ---
+
+    cursor.execute(base_query, params)
+    report = cursor.fetchone()
+    
+    if report:
+        report_data = dict(report)
+        return {"status": "success", "report": report_data}
+    
+    return {"status": "error", "message": "ไม่พบข้อมูลรายงาน หรือคุณไม่มีสิทธิ์เข้าถึง"}
 
 def handle_get_daily_final_report(payload, conn, cursor, session):
     target_date = get_daily_target_date(cursor)
@@ -647,14 +812,34 @@ def handle_get_daily_final_report(payload, conn, cursor, session):
     
 def handle_archive_daily_reports(payload, conn, cursor, session):
     reports_to_archive = payload.get("reports", [])
+    if not reports_to_archive and payload.get("date"):
+        target_date_str = payload.get("date")
+        cursor.execute("""
+            SELECT dr.*, u.rank, u.first_name, u.last_name
+            FROM daily_reports dr JOIN users u ON dr.submitted_by = u.username WHERE dr.report_date = %s
+        """, (target_date_str,))
+        reports_to_archive = [dict(row) for row in cursor.fetchall()]
+
     if not reports_to_archive:
         return {"status": "error", "message": "ไม่พบรายงานที่จะเก็บ"}
+
     for report in reports_to_archive:
         report_date = report["report_date"]
+        if isinstance(report_date, date):
+            report_date = report_date.isoformat()
+            
         department = report["department"]
         cursor.execute("DELETE FROM archived_daily_reports WHERE report_date = %s AND department = %s", (report_date, department))
         year, month, _ = map(int, report_date.split('-'))
-        submitted_by = f"{report['rank']} {report['first_name']} {report['last_name']}"
+        
+        if 'rank' in report:
+            submitted_by = f"{report['rank']} {report['first_name']} {report['last_name']}"
+        else:
+            submitted_by = report.get('submitted_by', 'Unknown')
+
+        summary_json = json.dumps(report["summary_data"]) if isinstance(report["summary_data"], dict) else report["summary_data"]
+        report_data_json = json.dumps(report["report_data"]) if isinstance(report["report_data"], dict) else report["report_data"]
+
         cursor.execute(
             """INSERT INTO archived_daily_reports
                (id, year, month, report_date, department, submitted_by, timestamp, summary_data, report_data)
@@ -662,10 +847,14 @@ def handle_archive_daily_reports(payload, conn, cursor, session):
             (
                 str(uuid.uuid4()), year, month, report_date, department,
                 submitted_by, report["timestamp"],
-                json.dumps(report["summary_data"]), json.dumps(report["report_data"])
+                summary_json, report_data_json
             )
         )
+    
     report_date_to_clear = reports_to_archive[0]["report_date"]
+    if isinstance(report_date_to_clear, date):
+        report_date_to_clear = report_date_to_clear.isoformat()
+
     cursor.execute("DELETE FROM daily_reports WHERE report_date = %s", (report_date_to_clear,))
     conn.commit()
     return {"status": "success", "message": f"เก็บรายงานวันที่ {report_date_to_clear} และรีเซ็ตแดชบอร์ดสำเร็จ"}
@@ -702,7 +891,7 @@ def handle_delete_holiday(payload, conn, cursor, session):
     conn.commit()
     return {"status": "success", "message": "ลบวันหยุดสำเร็จ"}
 
-# --- ACTION_MAP (อัปเดต 2 จุด) ---
+# --- ACTION_MAP ---
 ACTION_MAP = {
     # Weekly System Actions
     "login": {"handler": handle_login, "auth_required": False},
@@ -713,23 +902,18 @@ ACTION_MAP = {
     "update_user": {"handler": handle_update_user, "auth_required": True, "admin_only": True},
     "delete_user": {"handler": handle_delete_user, "auth_required": True, "admin_only": True},
     "list_personnel": {"handler": handle_list_personnel, "auth_required": True},
-    # --- START: PHASE 2 (RBAC Fix) ---
-    # ล็อคให้ Admin เท่านั้นที่เรียกดูรายละเอียดคน (เพื่อความปลอดภัย)
     "get_personnel_details": {"handler": handle_get_personnel_details, "auth_required": True, "admin_only": True},
-    # --- END: PHASE 2 (RBAC Fix) ---
     "add_personnel": {"handler": handle_add_personnel, "auth_required": True, "admin_only": True},
     "update_personnel": {"handler": handle_update_personnel, "auth_required": True, "admin_only": True},
     "delete_personnel": {"handler": handle_delete_personnel, "auth_required": True, "admin_only": True},
     "import_personnel": {"handler": handle_import_personnel, "auth_required": True, "admin_only": True},
     "submit_status_report": {"handler": handle_submit_status_report, "auth_required": True},
+    "submit_all_status_reports": {"handler": handle_submit_all_status_reports, "auth_required": True, "admin_only": True},
     "get_status_reports": {"handler": handle_get_status_reports, "auth_required": True, "admin_only": True},
     "archive_reports": {"handler": handle_archive_reports, "auth_required": True, "admin_only": True},
     "get_archived_reports": {"handler": handle_get_archived_reports, "auth_required": True, "admin_only": True},
     "get_submission_history": {"handler": handle_get_submission_history, "auth_required": True},
-    # --- START: PHASE 2 (RBAC Fix) ---
-    # แก้ไขช่องโหว่: action นี้ User ทั่วไปเรียกได้ แต่ handler ต้องเช็คสิทธิ์
-    "get_report_for_editing": {"handler": handle_get_report_for_editing, "auth_required": True}, # ไม่ admin_only
-    # --- END: PHASE 2 (RBAC Fix) ---
+    "get_report_for_editing": {"handler": handle_get_report_for_editing, "auth_required": True},
     "get_active_statuses": {"handler": handle_get_active_statuses, "auth_required": True},
 
     # Daily System Actions
@@ -737,6 +921,7 @@ ACTION_MAP = {
     "get_daily_personnel_for_submission": {"handler": handle_get_daily_personnel_for_submission, "auth_required": True},
     "submit_daily_report": {"handler": handle_submit_daily_report, "auth_required": True},
     "get_daily_submission_history": {"handler": handle_get_daily_submission_history, "auth_required": True},
+    "get_daily_report_for_editing": {"handler": handle_get_daily_report_for_editing, "auth_required": True},
     "get_daily_final_report": {"handler": handle_get_daily_final_report, "auth_required": True, "admin_only": True},
     "archive_daily_reports": {"handler": handle_archive_daily_reports, "auth_required": True, "admin_only": True},
     "get_archived_daily_reports": {"handler": handle_get_archived_daily_reports, "auth_required": True, "admin_only": True},

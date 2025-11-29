@@ -3,7 +3,7 @@ import uvicorn
 from fastapi import FastAPI, Request, Response, HTTPException, Cookie
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, ValidationError # <-- เพิ่ม ValidationError
+from pydantic import BaseModel, Field, ValidationError 
 from typing import Optional, Dict, Any
 from contextlib import contextmanager
 import os
@@ -61,6 +61,7 @@ VALIDATION_MAP = {
 
     "get_daily_personnel_for_submission": models.ListPayload,
     "submit_daily_report": models.SubmitDailyReportPayload,
+    "get_daily_report_for_editing": models.SimpleIdPayload,
     "archive_daily_reports": models.ArchiveDailyReportPayload,
 
     "add_holiday": models.HolidayPayload,
@@ -143,12 +144,16 @@ async def handle_api_request(request_data: ApiRequest, request: Request, respons
             if action_name == "login":
                 handler_kwargs["client_address"] = (request.client.host, request.client.port)
             
+            # --- [FIXED] เพิ่ม submit_all_status_reports เข้าไปในรายการนี้ ---
             if session and action_name in [
                 "logout", "list_personnel", "submit_status_report",
+                "submit_all_status_reports", # <-- เพิ่มบรรทัดนี้ เพื่อให้ส่ง Session ไปด้วย
                 "get_submission_history", "get_active_statuses",
                 "get_personnel_details",
+                "get_report_for_editing",
                 "get_daily_personnel_for_submission", "submit_daily_report",
                 "get_daily_dashboard_summary", "get_daily_submission_history",
+                "get_daily_report_for_editing", 
                 "get_daily_final_report", "archive_daily_reports",
                 "get_archived_daily_reports", "archive_reports",
                 "list_holidays", "add_holiday", "delete_holiday"
@@ -177,6 +182,8 @@ async def handle_api_request(request_data: ApiRequest, request: Request, respons
 
     except Exception as e:
         print(f"API Error on action '{action_name}': {e}")
+        import traceback
+        traceback.print_exc() 
         raise HTTPException(status_code=500, detail=f"Server error: {e}")
 
 # --- Static File Serving (เสิร์ฟ HTML/JS/CSS) ---

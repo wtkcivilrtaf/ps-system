@@ -4,7 +4,7 @@
 import { sendRequest } from './api.js';
 import * as ui from './ui.js';
 import * as handlers from './handlers.js';
-import { escapeHTML } from './utils.js';
+import { escapeHTML, exportSingleReportToExcel } from './utils.js';
 
 // --- Global State and DOM References ---
 window.currentUser = null;
@@ -13,7 +13,7 @@ window.allArchivedReports = {};
 window.allHistoryData = {};
 window.personnelCurrentPage = 1;
 window.userCurrentPage = 1;
-window.holidayDatepicker = null; // To store the holiday datepicker instance
+window.holidayDatepicker = null; 
 
 // --- Auto Logout Feature ---
 let inactivityTimer;
@@ -87,6 +87,7 @@ window.mainNav = null;
 window.mainTitle = null;
 window.holidayForm = null;
 window.holidayListContainer = null;
+window.submitAllBtn = null;
 
 // --- Main Initialization ---
 document.addEventListener('DOMContentLoaded', () => {
@@ -158,6 +159,7 @@ function assignDomElements() {
     window.mainTitle = document.getElementById('main-title');
     window.holidayForm = document.getElementById('holiday-form');
     window.holidayListContainer = document.getElementById('holiday-list-container');
+    window.submitAllBtn = document.getElementById('submit-all-btn');
 }
 
 
@@ -243,13 +245,10 @@ function initializePage() {
         submissionFormSection.classList.remove('hidden');
     });
     if (confirmSubmitBtn) confirmSubmitBtn.addEventListener('click', handlers.handleSubmitStatusReport);
-    if (exportArchiveBtn) exportArchiveBtn.addEventListener('click', () => {
-        if (!currentWeeklyReports || currentWeeklyReports.length === 0) {
-            ui.showMessage('ไม่มีข้อมูลรายงานที่จะส่งออก', false);
-            return;
-        }
-        archiveConfirmModal.classList.add('active');
-    });
+    
+    // หมายเหตุ: Logic ของ exportArchiveBtn ถูกย้ายไปจัดการใน loadDataForPane ('pane-report')
+    // เพื่อให้สามารถตรวจสอบ Missing Count และเปลี่ยนสถานะปุ่มได้อย่างถูกต้องแบบ Realtime
+
     if (cancelArchiveBtn) cancelArchiveBtn.addEventListener('click', () => archiveConfirmModal.classList.remove('active'));
     if (confirmArchiveBtn) confirmArchiveBtn.addEventListener('click', handlers.handleExportAndArchive);
     
@@ -324,7 +323,10 @@ function initializePage() {
         });
     }
 
-    // *** NEW: Holiday Management Event Listeners ***
+    if (window.submitAllBtn) {
+        window.submitAllBtn.style.display = 'none'; 
+    }
+
     if (holidayForm) {
         window.holidayDatepicker = flatpickr("#holiday-date", {
             locale: ui.thai_locale,
@@ -349,7 +351,105 @@ window.loadDataForPane = async function(paneId) {
         'pane-admin': { action: 'list_users', renderer: ui.renderUsers, searchInput: userSearchInput, pageState: 'userCurrentPage' },
         'pane-submit-status': { action: 'list_personnel', renderer: ui.renderStatusSubmissionForm, fetchAll: true },
         'pane-history': { action: 'get_submission_history', renderer: ui.renderSubmissionHistory },
-        'pane-report': { action: 'get_status_reports', renderer: ui.renderWeeklyReport },
+        
+        // --- [UPDATED] 2-Step Button Logic ---
+        'pane-report': { 
+            action: 'get_status_reports', 
+            renderer: (res) => {
+                ui.renderWeeklyReport(res);
+
+                if (window.currentUser && window.currentUser.role === 'admin') {
+                    let btn = document.getElementById('export-archive-btn');
+                    if (btn) {
+                        // 1. Reset ปุ่มโดยการ Clone (ลบ Event Listener เก่าออกทั้งหมด)
+                        const newBtn = btn.cloneNode(true);
+                        btn.parentNode.replaceChild(newBtn, btn);
+                        btn = newBtn; 
+
+                        btn.disabled = false;
+                        btn.classList.remove('bg-gray-400', 'cursor-not-allowed');
+                        
+                        const allDepts = res.all_departments || [];
+                        const submittedDepts = res.submitted_departments || [];
+                        const missingCount = allDepts.length - submittedDepts.length;
+
+                        if (missingCount > 0) {
+                            // --- สถานะที่ 1: ยังส่งไม่ครบ -> ปุ่มเป็น "Submit All" ---
+                            btn.className = 'bg-yellow-600 hover:bg-yellow-700 text-white font-bold py-2 px-4 rounded-lg shadow-md transition-all duration-200';
+                            btn.innerHTML = `⚡ ดึงยอดทุกแผนก (${missingCount} ขาด)`;
+                            btn.title = 'คลิกเพื่อดึงยอดล่าสุดของแผนกที่ยังไม่ส่งให้ครบ';
+                            
+                            btn.addEventListener('click', async () => {
+                                if (!confirm(`มี ${missingCount} แผนกยังไม่ส่งยอด\nยืนยันการ "ดึงยอดปัจจุบัน" ของทุกแผนกมาบันทึกทันทีหรือไม่?`)) return;
+                                
+                                try {
+                                    btn.disabled = true;
+                                    btn.textContent = 'กำลังประมวลผล...';
+                                    const submitRes = await sendRequest('submit_all_status_reports', {});
+                                    
+                                    if (submitRes.status === 'success') {
+                                        ui.showMessage('ดึงยอดครบทุกแผนกแล้ว (แดชบอร์ดเป็นสีเขียว)', true);
+                                        loadDataForPane('pane-report'); // รีโหลดหน้าจอ ปุ่มจะเปลี่ยนเป็นสถานะ 2
+                                    } else {
+                                        ui.showMessage(submitRes.message, false);
+                                        btn.disabled = false;
+                                        btn.innerHTML = `⚡ ดึงยอดทุกแผนก (${missingCount} ขาด)`;
+                                    }
+                                } catch(e) {
+                                    ui.showMessage(e.message, false);
+                                    btn.disabled = false;
+                                    btn.innerHTML = `⚡ ดึงยอดทุกแผนก (${missingCount} ขาด)`;
+                                }
+                            });
+
+                        } else {
+                            // --- สถานะที่ 2: ครบแล้ว -> ปุ่มเป็น "Export & Archive" ---
+                            btn.className = 'bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-lg shadow-md transition-all duration-200';
+                            btn.innerHTML = 'ส่งออกและเก็บรายงาน';
+                            btn.title = 'ข้อมูลครบถ้วน พร้อมส่งออกไฟล์ Excel และเก็บเข้า Archive';
+
+                            btn.addEventListener('click', async () => {
+                                if (!confirm('ยอดครบทุกแผนกแล้ว\nยืนยันการ "ส่งออกไฟล์ Excel" และ "เก็บรายงานเข้า Archive" หรือไม่?')) return;
+                                
+                                try {
+                                    btn.disabled = true;
+                                    btn.textContent = 'กำลังส่งออก...';
+                                    
+                                    // 1. ดึงข้อมูลรายงาน
+                                    const reportsRes = await sendRequest('get_status_reports', {});
+                                    
+                                    // 2. สร้างไฟล์ Excel
+                                    try {
+                                        exportSingleReportToExcel(reportsRes.reports, `รายงานประจำสัปดาห์-${reportsRes.weekly_date_range}.xlsx`, reportsRes.weekly_date_range);
+                                    } catch (ex) { console.error(ex); alert('สร้างไฟล์ Excel ไม่สำเร็จ'); }
+
+                                    // 3. สั่ง Archive
+                                    const archiveRes = await sendRequest('archive_reports', {
+                                        reports: reportsRes.reports,
+                                        week_range: reportsRes.weekly_date_range
+                                    });
+
+                                    if (archiveRes.status === 'success') {
+                                        ui.showMessage('เก็บรายงานเรียบร้อยแล้ว', true);
+                                        loadDataForPane('pane-dashboard'); // กลับไปหน้า Dashboard
+                                        document.getElementById('report-container').innerHTML = ''; // ล้างหน้า Report
+                                    } else {
+                                        ui.showMessage(archiveRes.message, false);
+                                    }
+                                } catch(e) {
+                                    ui.showMessage(e.message, false);
+                                } finally {
+                                    btn.disabled = false;
+                                    btn.textContent = 'ส่งออกและเก็บรายงาน';
+                                }
+                            });
+                        }
+                    }
+                }
+            } 
+        },
+        // -------------------------------------------------------------
+
         'pane-archive': { action: 'get_archived_reports', renderer: (res) => {
             const archives = res.archives;
             window.allArchivedReports = archives || {};
@@ -413,4 +513,3 @@ window.switchTab = function(tabId) {
         }
     });
 }
-

@@ -2,7 +2,7 @@
 // Main application file for the DAILY reporting system.
 
 import { sendRequest } from './api.js';
-import { escapeHTML, formatThaiDateArabic, formatThaiDateRangeArabic, exportDailyReportToExcel } from './utils.js';
+import { escapeHTML, formatThaiDateArabic, formatThaiDateRangeArabic, exportSingleReportToExcel } from './utils.js'; // ใช้ exportSingleReportToExcel แทน exportDailyReportToExcel ถ้าใน utils ไม่มี
 import { showMessage, createEmptyState, thai_locale, addStatusRow } from './ui.js';
 
 // --- Global State and DOM References ---
@@ -179,7 +179,8 @@ function renderDailyDashboard(res) {
     const summary = res.summary;
     if (!summary) return;
     
-    document.getElementById('daily-dashboard-date').textContent = formatThaiDateArabic(summary.date);
+    // [แก้ไข 1] เปลี่ยนจาก summary.date เป็น summary.report_date
+    document.getElementById('daily-dashboard-date').textContent = formatThaiDateArabic(summary.report_date);
     document.getElementById('daily-dashboard-total-personnel').textContent = summary.total_personnel || '0';
     
     const totalWithStatus = Object.values(summary.status_summary).reduce((sum, count) => sum + count, 0);
@@ -222,11 +223,9 @@ function renderDailySubmissionForm(res) {
         
         if (isSubmitted) {
             const submittedTime = new Date(isSubmitted.timestamp).toLocaleString('th-TH');
-            const tomorrow = new Date();
-            tomorrow.setDate(tomorrow.getDate() + 1);
-            const tomorrowIso = tomorrow.toISOString().split('T')[0];
-            const tomorrowFormatted = formatThaiDateArabic(tomorrowIso);
-            submissionInfoArea.innerHTML = `แผนก ${escapeHTML(dept)} ได้ส่งยอดสำหรับวันที่ ${tomorrowFormatted} ไปแล้วเมื่อ ${submittedTime} น.`;
+            // ใช้ report_date จาก response เพื่อแสดงวันที่ให้ถูกต้อง
+            const reportDateFormatted = formatThaiDateArabic(res.report_date);
+            submissionInfoArea.innerHTML = `แผนก ${escapeHTML(dept)} ได้ส่งยอดสำหรับวันที่ ${reportDateFormatted} ไปแล้วเมื่อ ${submittedTime} น.`;
             submissionInfoArea.classList.remove('hidden');
             submissionFormSection.classList.add('hidden');
             bulkButtonContainer.classList.add('hidden');
@@ -238,8 +237,8 @@ function renderDailySubmissionForm(res) {
         bulkButtonContainer.classList.remove('hidden');
         
         let reportDateFormatted;
-        if(editingReportData) {
-            reportDateFormatted = formatThaiDateArabic(editingReportData.date);
+        if(res.report_date) {
+            reportDateFormatted = formatThaiDateArabic(res.report_date);
         } else {
             const tomorrow = new Date();
             tomorrow.setDate(tomorrow.getDate() + 1);
@@ -386,7 +385,7 @@ function renderDailyHistory(reportsForMonth, all_departments) {
     }
 
     const reportsByDate = filteredReports.reduce((acc, report) => {
-        const dateKey = report.date;
+        const dateKey = report.report_date; // Corrected from date to report_date based on backend response
         if (!acc[dateKey]) acc[dateKey] = [];
         acc[dateKey].push(report);
         return acc;
@@ -439,14 +438,17 @@ function renderDailyHistory(reportsForMonth, all_departments) {
 function renderDailyReports(res) {
     if (!reportContainerDaily) return;
     reportContainerDaily.innerHTML = '';
-    const { reports, date } = res;
     
-    reportContainerDaily.dataset.reportDate = date; 
+    // [แก้ไข 2] ใช้ destructuring report_date แทน date
+    const { reports, report_date } = res;
+    
+    // [แก้ไข 3] ใช้ report_date
+    reportContainerDaily.dataset.reportDate = report_date; 
 
-    document.getElementById('report-date-daily').textContent = formatThaiDateArabic(date);
+    document.getElementById('report-date-daily').textContent = formatThaiDateArabic(report_date);
 
     if (!reports || reports.length === 0) {
-        reportContainerDaily.innerHTML = createEmptyState('ยังไม่มีแผนกใดส่งรายงานสำหรับวันพรุ่งนี้');
+        reportContainerDaily.innerHTML = createEmptyState('ยังไม่มีแผนกใดส่งรายงานสำหรับวันนี้');
         return;
     }
     
@@ -460,7 +462,21 @@ function renderDailyReports(res) {
                 id: report.id
             };
         }
-        acc[dept].items.push(...report.items);
+        acc[dept].items.push(...report.items); // Assuming 'items' are constructed in backend or handled here
+        // Note: Backend might send report_data as dictionary {officer: [], ...} or flattened items.
+        // Assuming backend sends flattened items or we need to flatten them.
+        // Checking backend: handle_get_daily_final_report returns report_data as is (dict of officer/nco/civ).
+        // We need to flatten it here for display.
+        if (report.report_data) {
+             const categories = ['officer', 'nco', 'civilian'];
+             categories.forEach(cat => {
+                 if (report.report_data[cat]) {
+                     report.report_data[cat].forEach(item => {
+                         acc[dept].items.push({...item, category: cat});
+                     });
+                 }
+             });
+        }
         return acc;
     }, {});
 
@@ -713,7 +729,7 @@ async function handleSubmitStatusReport() {
     }
 
     try {
-        const response = await sendRequest('submit_daily_status_report', { report: reportPayload });
+        const response = await sendRequest('submit_daily_report', { data: reportPayload });
         showMessage(response.message, response.status === 'success');
         if (response.status === 'success') {
             editingReportData = null; 
@@ -734,10 +750,13 @@ async function handleSubmitStatusReport() {
 async function handleExportDailyReport() {
     showMessage("กำลังเตรียมข้อมูลสำหรับ Export...", true);
     try {
-        const res = await sendRequest('get_daily_reports', {});
+        // [แก้ไข 4] แก้ชื่อ action ให้ถูกต้องเป็น get_daily_final_report
+        const res = await sendRequest('get_daily_final_report', {});
         if (res.status === 'success' && res.reports?.length > 0) {
-            const reportDateFormatted = formatThaiDateArabic(res.date);
-            exportDailyReportToExcel(res.reports, `รายงานประจำวัน-${res.date}.xlsx`, reportDateFormatted);
+            // [แก้ไข 5] ใช้ report_date
+            const reportDateFormatted = formatThaiDateArabic(res.report_date);
+            // ใช้ exportSingleReportToExcel เพราะ utils.js อาจจะไม่มี exportDailyReportToExcel
+            exportSingleReportToExcel(res.reports, `รายงานประจำวัน-${res.report_date}.xlsx`, reportDateFormatted);
         } else {
             showMessage("ไม่พบข้อมูลรายงานประจำวันที่จะ Export", false);
         }
@@ -792,8 +811,8 @@ async function loadDataForPane(paneId) {
     let payload = {};
     const actions = {
         'pane-dashboard-daily': { action: 'get_daily_dashboard_summary', renderer: renderDailyDashboard },
-        'pane-status-daily': { action: 'get_all_persistent_statuses', renderer: renderActiveStatuses },
-        'pane-submit-status-daily': { action: 'get_personnel_for_daily_report', renderer: renderDailySubmissionForm },
+        'pane-status-daily': { action: 'get_active_statuses', renderer: renderActiveStatuses },
+        'pane-submit-status-daily': { action: 'get_daily_personnel_for_submission', renderer: renderDailySubmissionForm },
         'pane-history-daily': { 
             action: 'get_daily_submission_history', 
             renderer: (res) => {
@@ -819,7 +838,8 @@ async function loadDataForPane(paneId) {
                 }
             }
         },
-        'pane-report-daily': { action: 'get_daily_reports', renderer: renderDailyReports },
+        // [แก้ไข 6] แก้ชื่อ action ให้ถูกต้องเป็น get_daily_final_report
+        'pane-report-daily': { action: 'get_daily_final_report', renderer: renderDailyReports },
     };
 
     const paneConfig = actions[paneId];
@@ -870,4 +890,3 @@ function switchTab(tabId) {
     
     loadDataForPane(paneId);
 }
-
