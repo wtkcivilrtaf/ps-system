@@ -87,7 +87,6 @@ window.mainNav = null;
 window.mainTitle = null;
 window.holidayForm = null;
 window.holidayListContainer = null;
-window.submitAllBtn = null;
 
 // --- Main Initialization ---
 document.addEventListener('DOMContentLoaded', () => {
@@ -159,7 +158,6 @@ function assignDomElements() {
     window.mainTitle = document.getElementById('main-title');
     window.holidayForm = document.getElementById('holiday-form');
     window.holidayListContainer = document.getElementById('holiday-list-container');
-    window.submitAllBtn = document.getElementById('submit-all-btn');
 }
 
 
@@ -246,9 +244,6 @@ function initializePage() {
     });
     if (confirmSubmitBtn) confirmSubmitBtn.addEventListener('click', handlers.handleSubmitStatusReport);
     
-    // หมายเหตุ: Logic ของ exportArchiveBtn ถูกย้ายไปจัดการใน loadDataForPane ('pane-report')
-    // เพื่อให้สามารถตรวจสอบ Missing Count และเปลี่ยนสถานะปุ่มได้อย่างถูกต้องแบบ Realtime
-
     if (cancelArchiveBtn) cancelArchiveBtn.addEventListener('click', () => archiveConfirmModal.classList.remove('active'));
     if (confirmArchiveBtn) confirmArchiveBtn.addEventListener('click', handlers.handleExportAndArchive);
     
@@ -323,10 +318,6 @@ function initializePage() {
         });
     }
 
-    if (window.submitAllBtn) {
-        window.submitAllBtn.style.display = 'none'; 
-    }
-
     if (holidayForm) {
         window.holidayDatepicker = flatpickr("#holiday-date", {
             locale: ui.thai_locale,
@@ -352,98 +343,81 @@ window.loadDataForPane = async function(paneId) {
         'pane-submit-status': { action: 'list_personnel', renderer: ui.renderStatusSubmissionForm, fetchAll: true },
         'pane-history': { action: 'get_submission_history', renderer: ui.renderSubmissionHistory },
         
-        // --- [UPDATED] 2-Step Button Logic ---
+        // --- [MODIFIED] Force removal of Submit All button and keep Export button ---
         'pane-report': { 
             action: 'get_status_reports', 
             renderer: (res) => {
+                // 1. Render UI normally
                 ui.renderWeeklyReport(res);
 
+                // 2. HARD CLEANUP: Remove any button that looks like "Submit All"
+                const reportPane = document.getElementById('pane-report');
+                if (reportPane) {
+                    const buttons = reportPane.getElementsByTagName('button');
+                    // Convert HTMLCollection to Array to iterate and remove safely
+                    Array.from(buttons).forEach(btn => {
+                        // Check for specific ID or Text content
+                        if (btn.id === 'submit-all-btn' || 
+                            btn.innerText.includes('ส่งยอดแทนทุกแผนก') || 
+                            btn.innerText.includes('Submit All')) {
+                            btn.remove();
+                        }
+                    });
+                }
+
+                // 3. FORCE EXPORT BUTTON: Ensure Export/Archive button is visible and active
                 if (window.currentUser && window.currentUser.role === 'admin') {
                     let btn = document.getElementById('export-archive-btn');
+                    
+                    // If button is missing (maybe replaced by UI), try to find it again or it might have been removed by ui.js logic
+                    // This logic assumes ui.js generates the button with this ID.
+                    
                     if (btn) {
-                        // 1. Reset ปุ่มโดยการ Clone (ลบ Event Listener เก่าออกทั้งหมด)
+                        // Force show
+                        btn.classList.remove('hidden');
+                        btn.style.display = 'inline-block';
+
+                        // Re-attach Event Listener
                         const newBtn = btn.cloneNode(true);
-                        btn.parentNode.replaceChild(newBtn, btn);
+                        if(btn.parentNode) {
+                            btn.parentNode.replaceChild(newBtn, btn);
+                        }
                         btn = newBtn; 
 
-                        btn.disabled = false;
-                        btn.classList.remove('bg-gray-400', 'cursor-not-allowed');
-                        
-                        const allDepts = res.all_departments || [];
-                        const submittedDepts = res.submitted_departments || [];
-                        const missingCount = allDepts.length - submittedDepts.length;
+                        btn.addEventListener('click', async () => {
+                            if (btn.disabled) return;
 
-                        if (missingCount > 0) {
-                            // --- สถานะที่ 1: ยังส่งไม่ครบ -> ปุ่มเป็น "Submit All" ---
-                            btn.className = 'bg-yellow-600 hover:bg-yellow-700 text-white font-bold py-2 px-4 rounded-lg shadow-md transition-all duration-200';
-                            btn.innerHTML = `⚡ ดึงยอดทุกแผนก (${missingCount} ขาด)`;
-                            btn.title = 'คลิกเพื่อดึงยอดล่าสุดของแผนกที่ยังไม่ส่งให้ครบ';
+                            if (!confirm('ยืนยันการ "ส่งออกไฟล์ Excel" และ "เก็บรายงานเข้า Archive" หรือไม่?')) return;
                             
-                            btn.addEventListener('click', async () => {
-                                if (!confirm(`มี ${missingCount} แผนกยังไม่ส่งยอด\nยืนยันการ "ดึงยอดปัจจุบัน" ของทุกแผนกมาบันทึกทันทีหรือไม่?`)) return;
+                            try {
+                                btn.disabled = true;
+                                btn.textContent = 'กำลังส่งออก...';
+                                
+                                const reportsRes = await sendRequest('get_status_reports', {});
                                 
                                 try {
-                                    btn.disabled = true;
-                                    btn.textContent = 'กำลังประมวลผล...';
-                                    const submitRes = await sendRequest('submit_all_status_reports', {});
-                                    
-                                    if (submitRes.status === 'success') {
-                                        ui.showMessage('ดึงยอดครบทุกแผนกแล้ว (แดชบอร์ดเป็นสีเขียว)', true);
-                                        loadDataForPane('pane-report'); // รีโหลดหน้าจอ ปุ่มจะเปลี่ยนเป็นสถานะ 2
-                                    } else {
-                                        ui.showMessage(submitRes.message, false);
-                                        btn.disabled = false;
-                                        btn.innerHTML = `⚡ ดึงยอดทุกแผนก (${missingCount} ขาด)`;
-                                    }
-                                } catch(e) {
-                                    ui.showMessage(e.message, false);
-                                    btn.disabled = false;
-                                    btn.innerHTML = `⚡ ดึงยอดทุกแผนก (${missingCount} ขาด)`;
+                                    exportSingleReportToExcel(reportsRes.reports, `รายงานประจำสัปดาห์-${reportsRes.weekly_date_range}.xlsx`, reportsRes.weekly_date_range);
+                                } catch (ex) { console.error(ex); alert('สร้างไฟล์ Excel ไม่สำเร็จ'); }
+
+                                const archiveRes = await sendRequest('archive_reports', {
+                                    reports: reportsRes.reports,
+                                    week_range: reportsRes.weekly_date_range
+                                });
+
+                                if (archiveRes.status === 'success') {
+                                    ui.showMessage('เก็บรายงานเรียบร้อยแล้ว', true);
+                                    loadDataForPane('pane-dashboard'); 
+                                    document.getElementById('report-container').innerHTML = '';
+                                } else {
+                                    ui.showMessage(archiveRes.message, false);
                                 }
-                            });
-
-                        } else {
-                            // --- สถานะที่ 2: ครบแล้ว -> ปุ่มเป็น "Export & Archive" ---
-                            btn.className = 'bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-lg shadow-md transition-all duration-200';
-                            btn.innerHTML = 'ส่งออกและเก็บรายงาน';
-                            btn.title = 'ข้อมูลครบถ้วน พร้อมส่งออกไฟล์ Excel และเก็บเข้า Archive';
-
-                            btn.addEventListener('click', async () => {
-                                if (!confirm('ยอดครบทุกแผนกแล้ว\nยืนยันการ "ส่งออกไฟล์ Excel" และ "เก็บรายงานเข้า Archive" หรือไม่?')) return;
-                                
-                                try {
-                                    btn.disabled = true;
-                                    btn.textContent = 'กำลังส่งออก...';
-                                    
-                                    // 1. ดึงข้อมูลรายงาน
-                                    const reportsRes = await sendRequest('get_status_reports', {});
-                                    
-                                    // 2. สร้างไฟล์ Excel
-                                    try {
-                                        exportSingleReportToExcel(reportsRes.reports, `รายงานประจำสัปดาห์-${reportsRes.weekly_date_range}.xlsx`, reportsRes.weekly_date_range);
-                                    } catch (ex) { console.error(ex); alert('สร้างไฟล์ Excel ไม่สำเร็จ'); }
-
-                                    // 3. สั่ง Archive
-                                    const archiveRes = await sendRequest('archive_reports', {
-                                        reports: reportsRes.reports,
-                                        week_range: reportsRes.weekly_date_range
-                                    });
-
-                                    if (archiveRes.status === 'success') {
-                                        ui.showMessage('เก็บรายงานเรียบร้อยแล้ว', true);
-                                        loadDataForPane('pane-dashboard'); // กลับไปหน้า Dashboard
-                                        document.getElementById('report-container').innerHTML = ''; // ล้างหน้า Report
-                                    } else {
-                                        ui.showMessage(archiveRes.message, false);
-                                    }
-                                } catch(e) {
-                                    ui.showMessage(e.message, false);
-                                } finally {
-                                    btn.disabled = false;
-                                    btn.textContent = 'ส่งออกและเก็บรายงาน';
-                                }
-                            });
-                        }
+                            } catch(e) {
+                                ui.showMessage(e.message, false);
+                            } finally {
+                                btn.disabled = false;
+                                btn.textContent = 'ส่งออกและเก็บรายงาน';
+                            }
+                        });
                     }
                 }
             } 

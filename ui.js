@@ -570,10 +570,61 @@ export function renderWeeklyReport(res) {
         const deptReport = reportsByDept[department];
         const reportWrapper = document.createElement('div');
         reportWrapper.className = 'p-4 border rounded-lg bg-gray-50';
-        const itemsHtml = deptReport.items.map((item, index) => `<tr class="border-t"><td class="py-2 pr-2 text-center">${index + 1}</td><td class="py-2 px-2">${escapeHTML(item.personnel_name)}</td><td class="py-2 px-2 text-blue-600">${escapeHTML(item.status)}</td><td class="py-2 px-2 text-gray-600">${escapeHTML(item.details) || '-'}</td><td class="py-2 pl-2 text-gray-600">${formatThaiDateRangeArabic(item.start_date, item.end_date)}</td></tr>`).join('');
+        
+        // --- MODIFIED LOGIC: Strict filtering with trim() ---
+        // This ensures spaces or other 'empty-like' values are caught
+        const activeItems = deptReport.items 
+            ? deptReport.items.filter(item => {
+                if (!item.status) return false;
+                const s = item.status.trim();
+                return s !== '' && s !== 'ไม่มี' && s !== '-' && s !== 'ปกติ';
+            }) 
+            : [];
+
+        let contentHtml = '';
+        
+        // --- DISPLAY LOGIC ---
+        if (activeItems.length > 0) {
+            const rowsHtml = activeItems.map((item, index) => 
+                `<tr class="border-t">
+                    <td class="py-2 pr-2 text-center">${index + 1}</td>
+                    <td class="py-2 px-2">${escapeHTML(item.personnel_name)}</td>
+                    <td class="py-2 px-2 text-blue-600">${escapeHTML(item.status)}</td>
+                    <td class="py-2 px-2 text-gray-600">${escapeHTML(item.details) || '-'}</td>
+                    <td class="py-2 pl-2 text-gray-600">${formatThaiDateRangeArabic(item.start_date, item.end_date)}</td>
+                </tr>`
+            ).join('');
+            
+            contentHtml = `
+            <div class="overflow-x-auto">
+                <table class="min-w-full bg-white text-sm">
+                    <thead>
+                        <tr>
+                            <th class="text-center font-medium text-gray-500 uppercase pb-1 w-[5%]">ลำดับ</th>
+                            <th class="text-left font-medium text-gray-500 uppercase pb-1 w-[30%]">ชื่อ-สกุล</th>
+                            <th class="text-left font-medium text-gray-500 uppercase pb-1 w-[15%]">สถานะ</th>
+                            <th class="text-left font-medium text-gray-500 uppercase pb-1 w-[30%]">รายละเอียด</th>
+                            <th class="text-left font-medium text-gray-500 uppercase pb-1 w-[20%]">ช่วงวันที่</th>
+                        </tr>
+                    </thead>
+                    <tbody>${rowsHtml}</tbody>
+                </table>
+            </div>`;
+        } else {
+            // Show Green Box when list is empty
+            contentHtml = `
+            <div class="mt-4 text-center py-6 bg-green-50 rounded-lg border border-green-100 shadow-sm">
+                <div class="inline-flex items-center justify-center w-12 h-12 rounded-full bg-green-100 mb-2">
+                    <svg class="w-6 h-6 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>
+                </div>
+                <p class="text-green-700 font-bold text-lg">กำลังพลมาปฏิบัติงานครบถ้วน</p>
+                <p class="text-green-600 text-sm mt-1">ไม่มีกำลังพล ลา/ศึกษา/ราชการ/คุมงาน ในรอบนี้</p>
+            </div>`;
+        }
+
         const submittedTime = new Date(deptReport.timestamp).toLocaleString('th-TH');
         
-        const editButtonHtml = `<button data-id="${deptReport.id}" class="edit-weekly-report-btn bg-yellow-500 hover:bg-yellow-600 text-white text-sm font-bold py-1 px-3 rounded-lg">แก้ไข</button>`;
+        const editButtonHtml = `<button data-id="${deptReport.id}" class="edit-weekly-report-btn bg-yellow-500 hover:bg-yellow-600 text-white text-sm font-bold py-1 px-3 rounded-lg transition duration-150">แก้ไข</button>`;
 
         reportWrapper.innerHTML = `
             <div class="flex flex-wrap justify-between items-center mb-3 gap-2">
@@ -586,20 +637,8 @@ export function renderWeeklyReport(res) {
                     ${editButtonHtml}
                 </div>
             </div>
-            <div class="overflow-x-auto">
-                <table class="min-w-full bg-white text-sm">
-                    <thead>
-                        <tr>
-                            <th class="text-center font-medium text-gray-500 uppercase pb-1 w-[5%]">ลำดับ</th>
-                            <th class="text-left font-medium text-gray-500 uppercase pb-1 w-[30%]">ชื่อ-สกุล</th>
-                            <th class="text-left font-medium text-gray-500 uppercase pb-1 w-[15%]">สถานะ</th>
-                            <th class="text-left font-medium text-gray-500 uppercase pb-1 w-[30%]">รายละเอียด</th>
-                            <th class="text-left font-medium text-gray-500 uppercase pb-1 w-[20%]">ช่วงวันที่</th>
-                        </tr>
-                    </thead>
-                    <tbody>${itemsHtml}</tbody>
-                </table>
-            </div>`;
+            ${contentHtml}`;
+            
         window.reportContainer.appendChild(reportWrapper);
     }
 }
@@ -643,20 +682,29 @@ export function renderFilteredHistoryReports(reports) {
     reports.forEach(report => {
         const reportWrapper = document.createElement('div');
         reportWrapper.className = 'p-4 border rounded-lg bg-gray-50 mb-4';
-        const itemsHtml = report.items.map((item, index) => `<tr class="border-t"><td class="py-2 pr-2 text-center">${index + 1}</td><td class="py-2 px-2">${escapeHTML(item.personnel_name)}</td><td class="py-2 px-2 text-blue-600">${escapeHTML(item.status)}</td><td class="py-2 px-2 text-gray-600">${escapeHTML(item.details) || '-'}</td><td class="py-2 pl-2 text-gray-600">${formatThaiDateRangeArabic(item.start_date, item.end_date)}</td></tr>`).join('');
         
-        const editButtonHtml = report.source === 'active' 
-            ? `<button data-id="${report.id}" class="edit-history-btn bg-blue-500 hover:bg-blue-600 text-white text-sm font-bold py-1 px-3 rounded-lg">แก้ไข</button>` 
-            : `<span class="text-sm text-gray-400">(เก็บถาวรแล้ว)</span>`;
-
-        reportWrapper.innerHTML = `
-            <div class="flex flex-wrap justify-between items-center mb-3 gap-2">
-                <div>
-                    <h4 class="text-lg font-semibold text-gray-800">รายงานวันที่ ${formatThaiDateArabic(report.date)}</h4>
-                    <span class="text-sm text-gray-500">ส่งเมื่อ: ${new Date(report.timestamp).toLocaleString('th-TH')}</span>
-                </div>
-                ${editButtonHtml}
-            </div>
+        // --- MODIFIED LOGIC: Strict filtering for History ---
+        const activeItems = report.items 
+            ? report.items.filter(item => {
+                if (!item.status) return false;
+                const s = item.status.trim();
+                return s !== '' && s !== 'ไม่มี' && s !== '-' && s !== 'ปกติ';
+            }) 
+            : [];
+        
+        let contentHtml = '';
+        if (activeItems.length > 0) {
+             const rowsHtml = activeItems.map((item, index) => 
+                `<tr class="border-t">
+                    <td class="py-2 pr-2 text-center">${index + 1}</td>
+                    <td class="py-2 px-2">${escapeHTML(item.personnel_name)}</td>
+                    <td class="py-2 px-2 text-blue-600">${escapeHTML(item.status)}</td>
+                    <td class="py-2 px-2 text-gray-600">${escapeHTML(item.details) || '-'}</td>
+                    <td class="py-2 pl-2 text-gray-600">${formatThaiDateRangeArabic(item.start_date, item.end_date)}</td>
+                </tr>`
+            ).join('');
+            
+            contentHtml = `
             <div class="overflow-x-auto">
                 <table class="min-w-full bg-white text-sm">
                     <thead>
@@ -668,9 +716,33 @@ export function renderFilteredHistoryReports(reports) {
                             <th class="text-left font-medium text-gray-500 uppercase pb-1 w-[20%]">ช่วงวันที่</th>
                         </tr>
                     </thead>
-                    <tbody>${itemsHtml}</tbody>
+                    <tbody>${rowsHtml}</tbody>
                 </table>
             </div>`;
+        } else {
+             contentHtml = `
+            <div class="mt-4 text-center py-6 bg-green-50 rounded-lg border border-green-100 shadow-sm">
+                <div class="inline-flex items-center justify-center w-12 h-12 rounded-full bg-green-100 mb-2">
+                    <svg class="w-6 h-6 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>
+                </div>
+                <p class="text-green-700 font-bold text-lg">กำลังพลมาปฏิบัติงานครบถ้วน</p>
+                <p class="text-green-600 text-sm mt-1">ไม่มีกำลังพล ลา/ศึกษา/ราชการ/คุมงาน ในรอบนี้</p>
+            </div>`;
+        }
+
+        const editButtonHtml = report.source === 'active' 
+            ? `<button data-id="${report.id}" class="edit-history-btn bg-blue-500 hover:bg-blue-600 text-white text-sm font-bold py-1 px-3 rounded-lg transition duration-150">แก้ไข</button>` 
+            : `<span class="text-sm text-gray-400">(เก็บถาวรแล้ว)</span>`;
+
+        reportWrapper.innerHTML = `
+            <div class="flex flex-wrap justify-between items-center mb-3 gap-2">
+                <div>
+                    <h4 class="text-lg font-semibold text-gray-800">รายงานวันที่ ${formatThaiDateArabic(report.date)}</h4>
+                    <span class="text-sm text-gray-500">ส่งเมื่อ: ${new Date(report.timestamp).toLocaleString('th-TH')}</span>
+                </div>
+                ${editButtonHtml}
+            </div>
+            ${contentHtml}`;
         historyContainer.appendChild(reportWrapper);
     });
 }
@@ -708,20 +780,27 @@ export function renderArchivedReports(reports) {
         const archivedBy = batch.archived_by || 'ไม่ระบุ';
 
         let reportsHtml = batch.reports.map(report => {
-            const itemsHtml = report.items.map((item, index) => 
-                `<tr class="border-t">
-                    <td class="py-2 pr-2 text-center">${index + 1}</td>
-                    <td class="py-2 px-2">${escapeHTML(item.personnel_name)}</td>
-                    <td class="py-2 px-2">${escapeHTML(item.status)}: ${escapeHTML(item.details) || '-'}</td>
-                    <td class="py-2 pl-2">${formatThaiDateRangeArabic(item.start_date, item.end_date)}</td>
-                </tr>`
-            ).join('');
+            // --- MODIFIED LOGIC: Strict filtering for Archives ---
+            const activeItems = report.items 
+                ? report.items.filter(item => {
+                    if (!item.status) return false;
+                    const s = item.status.trim();
+                    return s !== '' && s !== 'ไม่มี' && s !== '-' && s !== 'ปกติ';
+                }) 
+                : [];
 
-            return `<div class="mt-4">
-                <div class="flex justify-between items-center text-sm text-gray-600 mb-2 p-2 bg-gray-100 rounded-t-md">
-                    <strong>แผนก: ${escapeHTML(report.department)}</strong>
-                    <span>(ส่งโดย: ${escapeHTML(report.rank)} ${escapeHTML(report.first_name)})</span>
-                </div>
+            let contentHtml = '';
+            if (activeItems.length > 0) {
+                 const rowsHtml = activeItems.map((item, index) => 
+                    `<tr class="border-t">
+                        <td class="py-2 pr-2 text-center">${index + 1}</td>
+                        <td class="py-2 px-2">${escapeHTML(item.personnel_name)}</td>
+                        <td class="py-2 px-2">${escapeHTML(item.status)}: ${escapeHTML(item.details) || '-'}</td>
+                        <td class="py-2 pl-2">${formatThaiDateRangeArabic(item.start_date, item.end_date)}</td>
+                    </tr>`
+                ).join('');
+                
+                contentHtml = `
                 <table class="min-w-full bg-white text-sm">
                     <thead><tr>
                         <th class="w-[5%]"></th>
@@ -729,12 +808,24 @@ export function renderArchivedReports(reports) {
                         <th class="w-[40%]"></th>
                         <th class="w-[20%]"></th>
                     </tr></thead>
-                    <tbody>${itemsHtml || '<tr><td colspan="4" class="text-center py-3 text-gray-500">ไม่มีกำลังพลที่ติดภารกิจในรอบนี้</td></tr>'}</tbody>
-                </table>
+                    <tbody>${rowsHtml}</tbody>
+                </table>`;
+            } else {
+                 contentHtml = `
+                <div class="text-center py-3 bg-green-50 rounded-lg border border-green-100">
+                    <p class="text-green-700 font-semibold text-sm">✨ กำลังพลมาปฏิบัติงานครบถ้วน ✨</p>
+                </div>`;
+            }
+
+            return `<div class="mt-4">
+                <div class="flex justify-between items-center text-sm text-gray-600 mb-2 p-2 bg-gray-100 rounded-t-md">
+                    <strong>แผนก: ${escapeHTML(report.department)}</strong>
+                    <span>(ส่งโดย: ${escapeHTML(report.rank)} ${escapeHTML(report.first_name)})</span>
+                </div>
+                ${contentHtml}
             </div>`;
         }).join('');
-        
-        // --- ↓ จุดที่แก้ไขทั้งหมดอยู่ตรงนี้ ---
+    
         archiveWrapper.innerHTML = `
             <div class="flex flex-wrap justify-between items-center gap-2">
                 <div>
@@ -749,9 +840,7 @@ export function renderArchivedReports(reports) {
         archiveWrapper.querySelector('.download-archive-batch-btn').addEventListener('click', () => {
             exportSingleReportToExcel(batch.reports, `รายงานย้อนหลัง-${batch.week_range}.xlsx`, batch.week_range);
         });
-        // --- สิ้นสุดจุดที่แก้ไข ---
-
-        window.archiveContainer.appendChild(archiveWrapper);
+    window.archiveContainer.appendChild(archiveWrapper);
     });
 }
 
